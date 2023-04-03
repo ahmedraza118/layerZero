@@ -6,7 +6,6 @@ import "erc721a/contracts/ERC721A.sol";
 import "operator-filter-registry/src/DefaultOperatorFilterer.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/token/common/ERC2981.sol";
-import "@openzeppelin/contracts/utils/cryptography/MerkleProof.sol";
 import "./ONFT721ACore.sol";
 import "./ERC4907A.sol";
 
@@ -190,49 +189,90 @@ abstract contract Template is
 }
 
 contract ONFTContract is Template {
-
+    mapping(bytes => bool) public _signatureUsed;
     mapping(uint256 => uint256) public maxMintPresales;
     mapping(uint256 => uint256) public itemPricePresales;
-    mapping(uint256 => bytes32) public whitelistMerkleRoots;
     uint256 public presaleActiveTime = type(uint256).max;
 
     constructor(uint256 _minGasToTransfer, address _lzEndpoint, bool _mintingAllowed) ONFT721ACore(_minGasToTransfer, _lzEndpoint) Template(_mintingAllowed){}
 
-    function _inWhitelist(
+    function purchaseNft(
+        uint256 _howMany,
         address _owner,
-        bytes32[] memory _proof,
-        uint256 _rootNumber
-    ) private view returns (bool) {
+        bytes32 _signedMessageHash,
+        bytes memory _signature
+    ) external payable {
+        require(block.timestamp > presaleActiveTime, "Presale is not active");
+        require(
+            _howMany > 0 && _howMany <= 10,
+            "Invalid quantity of tokens to purchase"
+        );
+
+        require(
+            _signatureUsed[_signature] == false,
+            "Signaute is Already Used"
+        );
+
+        require(
+            _signature.length == 65,
+            "Invalid signature length"
+        );
+        address recoveredSigner = verifySignature(_signedMessageHash, _signature);
+        require(recoveredSigner == _owner, "Invalid signature");
+        _signatureUsed[_signature] = true;
+        _safeMint(msg.sender, _howMany);
+
+    }
+
+    // function to return the messageHash
+    function messageHash(string memory _message) public pure returns (bytes32) {
+        return keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", _message));
+    }
+    function getEthSignedMessageHash(
+        bytes32 _messageHash
+    ) public pure returns (bytes32) {
+        /*
+        Signature is produced by signing a keccak256 hash with the following format:
+        "\x19Ethereum Signed Message\n" + len(msg) + msg
+        */
         return
-            MerkleProof.verify(
-                _proof,
-                whitelistMerkleRoots[_rootNumber],
-                keccak256(abi.encodePacked(_owner))
+            keccak256(
+                abi.encodePacked("\x19Ethereum Signed Message:\n32", _messageHash)
             );
     }
 
-    function purchaseTokensWhitelist(
-        uint256 _howMany,
-        bytes32[] calldata _proof,
-        uint256 _rootNumber
-    ) external payable {
-        require(mintingAllowed, "Minting not allowed on this contract");
-        require(block.timestamp > presaleActiveTime, "Presale is not active");
-        require(
-            _inWhitelist(msg.sender, _proof, _rootNumber),
-            "You are not in presale"
-        );
-        require(
-            msg.value == _howMany * itemPricePresales[_rootNumber],
-            "Try to send more ETH"
-        );
-        require(
-            _numberMinted(msg.sender) + _howMany <=
-                maxMintPresales[_rootNumber],
-            "Purchase exceeds max allowed"
-        );
+    // verifySignature helper function
+    function verifySignature(bytes32 _signedMessageHash, bytes memory _signature)
+        public
+        pure
+        returns (address)
+    {
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
 
-        _safeMint(msg.sender, _howMany);
+        // Check the signature length
+        require(_signature.length == 65, "Invalid signature length");
+
+        // Divide the signature into its three components
+        assembly {
+            r := mload(add(_signature, 32))
+            s := mload(add(_signature, 64))
+            v := and(mload(add(_signature, 65)), 255)
+        }
+
+        // Ensure the validity of v
+        // Ensure the validity of v
+        if (v < 27) {
+            v += 27;
+        }
+        require(v == 27 || v == 28, "Invalid signature v value");
+
+        // Recover the signer's address
+        address signer = ecrecover(_signedMessageHash, v, r, s);
+        require(signer != address(0), "Invalid signature");
+
+        return signer;
     }
 
     function safeTransferFrom(
@@ -255,13 +295,11 @@ contract ONFTContract is Template {
 
     function setPresale(
         uint256 _rootNumber,
-        bytes32 _whitelistMerkleRoot,
         uint256 _maxMintPresales,
         uint256 _itemPricePresale
     ) external onlyOwner {
         maxMintPresales[_rootNumber] = _maxMintPresales;
         itemPricePresales[_rootNumber] = _itemPricePresale;
-        whitelistMerkleRoots[_rootNumber] = _whitelistMerkleRoot;
     }
 
     // implementing Operator Filter Registry
